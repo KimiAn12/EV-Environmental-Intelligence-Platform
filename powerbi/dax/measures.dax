@@ -1,0 +1,71 @@
+Total Vehicles =
+DISTINCTCOUNT ( ev_environmental_performance[vehicle_id] )
+
+Total Regions =
+DISTINCTCOUNT ( ev_environmental_performance[region] )
+
+Average Observed Efficiency =
+AVERAGE ( ev_environmental_performance[observed_efficiency_kwh_per_100km] )
+
+Average Rated Efficiency =
+AVERAGE ( ev_environmental_performance[rated_efficiency_kwh_per_100km] )
+
+Average Efficiency Delta =
+AVERAGE ( ev_environmental_performance[efficiency_delta_kwh_per_100km] )
+
+Average Efficiency Penalty % =
+AVERAGE ( ev_environmental_performance[efficiency_penalty_pct] )
+
+Average Estimated Range Km =
+AVERAGE ( ev_environmental_performance[estimated_range_km] )
+
+Fleet Battery Capacity kWh =
+SUM ( ev_environmental_performance[battery_kwh] )
+
+Average Temperature C =
+AVERAGE ( ev_environmental_performance[temperature_c] )
+
+Elevated Risk Vehicles =
+CALCULATE (
+    DISTINCTCOUNT ( ev_environmental_performance[vehicle_id] ),
+    ev_environmental_performance[operational_risk_label] <> "normal"
+)
+
+Elevated Risk Vehicle % =
+DIVIDE ( [Elevated Risk Vehicles], [Total Vehicles] )
+
+Vehicles Missing Weather =
+CALCULATE (
+    DISTINCTCOUNT ( ev_environmental_performance[vehicle_id] ),
+    ev_environmental_performance[has_weather_match] = 0
+)
+
+Weather Match Rate % =
+1 - DIVIDE ( [Vehicles Missing Weather], [Total Vehicles] )
+
+Vehicles Needing Charging Priority =
+CALCULATE (
+    SUM ( charging_planning_signals[vehicle_count] ),
+    charging_planning_signals[charging_planning_signal] = "prioritize_charging_capacity"
+)
+
+Data Quality Failed Checks =
+CALCULATE (
+    COUNTROWS ( data_quality_latest ),
+    data_quality_latest[status] = "fail"
+)
+
+Data Quality Passed Checks =
+CALCULATE (
+    COUNTROWS ( data_quality_latest ),
+    data_quality_latest[status] = "pass"
+)
+
+Latest Weather Fetch =
+MAX ( refresh_summary[latest_weather_fetch_at] )
+
+Latest EV Load =
+MAX ( refresh_summary[latest_ev_load_at] )
+
+Dashboard Refreshed At =
+MAX ( refresh_summary[dashboard_refreshed_at] )
