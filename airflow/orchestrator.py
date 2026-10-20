@@ -22,7 +22,6 @@ default_args = {
     'retry_delay': timedelta(minutes=3),
 }
 
-
 dag = DAG(
     dag_id = "ev-environmental-intelligence",
     default_args=default_args,

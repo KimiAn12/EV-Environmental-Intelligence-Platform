@@ -1,4 +1,4 @@
-import os
+﻿import os
 from datetime import datetime
 
 import requests
@@ -18,14 +18,15 @@ def fetch_data(location):
     api_key = os.getenv("WEATHERSTACK_API_KEY", "")
     if not api_key:
         raise ValueError("WEATHERSTACK_API_KEY is required when USE_MOCK_WEATHER=false")
-
     response = requests.get(
         WEATHERSTACK_URL,
         params={"access_key": api_key, "query": location},
         timeout=30,
     )
+
     response.raise_for_status()
     payload = response.json()
+
     if payload.get("success") is False:
         raise ValueError(f"Weatherstack error for {location}: {payload}")
     return payload
@@ -39,10 +40,13 @@ def mock_fetch_data(location="New York"):
         "Fremont": ("United States of America", "California", 17, "Partly cloudy", 9, "-8.0"),
         "Toronto": ("Canada", "Ontario", -6, "Overcast", 16, "-5.0"),
     }
+
     country, region, temperature, description, wind_speed, utc_offset = city_profiles.get(
         location, city_profiles["New York"]
     )
+
     localtime = datetime.utcnow().replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+
     return {
         "request": {"type": "City", "query": f"{location}, {country}", "language": "en", "unit": "m"},
         "location": {

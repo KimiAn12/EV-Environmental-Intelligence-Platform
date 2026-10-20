@@ -15,17 +15,17 @@ EV_DATA_PATH = Path(os.getenv("EV_DATA_PATH", PROJECT_ROOT / "data" / "ev" / "fl
 def connect_to_db():
     print("connecting to db")
     try:
-        conn = psycopg2.connect(
+        return psycopg2.connect(
             host=os.getenv("DB_HOST", "localhost"),
             port=int(os.getenv("DB_PORT", "5432")),
             dbname=os.getenv("DB_NAME", "my_weather_db"),
             user=os.getenv("DB_USER", "my_weather_user"),
             password=os.getenv("DB_PASSWORD", "my_weather_password"),
         )
-        return conn
     except psycopg2.Error as e:
         print(f"Database connection failed: {e}")
         raise
+
 
 def create_table(conn):
     print("creating warehouse schemas and raw tables if not exists")
@@ -94,7 +94,7 @@ def insert_weather_payload(conn, location_query, payload):
                 payload_hash
             ) VALUES (%s, %s, %s, %s)
             ON CONFLICT (payload_hash) DO NOTHING
-        """,(
+        """, (
             "weatherstack",
             location_query,
             Json(payload),
@@ -183,5 +183,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
