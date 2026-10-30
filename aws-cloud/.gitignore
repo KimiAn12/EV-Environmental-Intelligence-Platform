@@ -1,0 +1,19 @@
+# Local AWS settings and credentials
+.env
+.env.*
+!.env.example
+*.pem
+
+# Python and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# CloudFormation and local state artifacts
+*.packaged.yml
+*.packaged.yaml
+*.packaged.json
+terraform.tfstate*
+.terraform/

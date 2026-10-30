@@ -1,0 +1,72 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Private S3 data lake foundation for the EV Environmental Intelligence Platform.
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: Globally unique S3 general purpose bucket name (lowercase letters, numbers, dots, and hyphens).
+    MinLength: 3
+    MaxLength: 63
+    AllowedPattern: '^[a-z0-9][a-z0-9.-]*[a-z0-9]$'
+    ConstraintDescription: Use 3-63 lowercase letters, numbers, dots, or hyphens; start and end with a letter or number.
+
+Resources:
+  DataLakeBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref BucketName
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            Filter:
+              Prefix: ''
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Project
+          Value: EV-Environmental-Intelligence-Platform
+        - Key: Environment
+          Value: learning
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  EnforceTLS:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DataLakeBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt DataLakeBucket.Arn
+              - !Sub '${DataLakeBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+Outputs:
+  DataLakeBucketName:
+    Description: Bucket for raw, processed, and analytics datasets.
+    Value: !Ref DataLakeBucket
+  DataLakeBucketArn:
+    Description: ARN of the data lake bucket.
+    Value: !GetAtt DataLakeBucket.Arn
