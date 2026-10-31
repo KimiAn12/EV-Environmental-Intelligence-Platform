@@ -10,6 +10,7 @@ import math
 import os
 import re
 import sys
+import time
 import unicodedata
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -103,6 +104,12 @@ def validate_weather_payload(payload: Any) -> None:
         raise ValueError("Weather payload must contain a current object")
     if not payload["location"].get("name"):
         raise ValueError("Weather payload location.name is required")
+    try:
+        temperature = float(payload["current"]["temperature"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Weather payload current.temperature must be numeric") from exc
+    if not math.isfinite(temperature) or not -60 <= temperature <= 60:
+        raise ValueError("Weather temperature must be within the expected -60 to 60 Celsius range")
 
 
 def create_s3_client():
@@ -133,13 +140,24 @@ def upload_ev_file(
         raise ValueError(f"EV input is not valid JSON: {source}") from exc
 
     partition_date = _ingest_date(ingest_date)
-    # Add the ingestion partition to each row so Spark can use it after reading JSON Lines.
-    rows = [{**record, "ingest_date": partition_date} for record in records]
+    ingested_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    # Keep an ingestion timestamp in the object without making the content-addressed key vary on retries.
+    stable_rows = [{**record, "ingest_date": partition_date} for record in records]
+    digest = _sha256(b"\n".join(_canonical_json(row) for row in stable_rows) + b"\n")
+    rows = [
+        {
+            **row,
+            "source": "ev_fleet_file",
+            "source_file": source.name,
+            "ingested_at": ingested_at,
+        }
+        for row in stable_rows
+    ]
     body = b"\n".join(_canonical_json(row) for row in rows) + b"\n"
-    digest = _sha256(body)
-    key = f"raw/ev/ingest_date={partition_date}/{source.stem}-{digest[:16]}.jsonl"
-    _put_object(s3_client, bucket, key, body, "application/x-ndjson")
-    logger.info("Uploaded %d EV records to s3://%s/%s", len(records), bucket, key)
+    key = f"raw/ev/ingest_date={partition_date}/{source.stem}-{digest}.jsonl"
+    uploaded = _put_object(s3_client, bucket, key, body, "application/x-ndjson")
+    action = "Uploaded" if uploaded else "Skipped duplicate"
+    logger.info("%s %d EV records at s3://%s/%s", action, len(records), bucket, key)
     return key
 
 
@@ -153,29 +171,47 @@ def upload_weather_payload(
 ) -> str:
     validate_weather_payload(payload)
     partition_date = _ingest_date(ingest_date)
+    ingested_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     envelope = {
         "source": source,
         "location_query": location_query,
         "ingest_date": partition_date,
+        "ingested_at": ingested_at,
         "payload_hash": _sha256(_canonical_json(payload)),
         "payload": payload,
     }
+    stable_envelope = {key: value for key, value in envelope.items() if key != "ingested_at"}
+    digest = _sha256(_canonical_json(stable_envelope) + b"\n")
     body = _canonical_json(envelope) + b"\n"
-    digest = _sha256(body)
     city = str(payload["location"]["name"])
     key = (
         f"raw/weather/ingest_date={partition_date}/location={_slug(city)}/"
-        f"weather-{digest[:16]}.json"
+        f"weather-{digest}.json"
     )
-    _put_object(s3_client, bucket, key, body, "application/json")
-    logger.info("Uploaded weather payload for %s to s3://%s/%s", location_query, bucket, key)
+    uploaded = _put_object(s3_client, bucket, key, body, "application/json")
+    action = "Uploaded" if uploaded else "Skipped duplicate"
+    logger.info("%s weather payload for %s at s3://%s/%s", action, location_query, bucket, key)
     return key
 
 
-def _put_object(s3_client, bucket: str, key: str, body: bytes, content_type: str) -> None:
+def _put_object(s3_client, bucket: str, key: str, body: bytes, content_type: str) -> bool:
     try:
-        s3_client.put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type)
-    except Exception:
+        s3_client.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=body,
+            ContentType=content_type,
+            IfNoneMatch="*",
+        )
+        return True
+    except Exception as exc:
+        response = getattr(exc, "response", {})
+        error = response.get("Error", {}) if isinstance(response, dict) else {}
+        code = str(error.get("Code", ""))
+        status = response.get("ResponseMetadata", {}).get("HTTPStatusCode") if isinstance(response, dict) else None
+        if code in {"PreconditionFailed", "412"} or status == 412:
+            logger.info("Object already exists; preserving existing object s3://%s/%s", bucket, key)
+            return False
         logger.exception("S3 upload failed for s3://%s/%s", bucket, key)
         raise
 
@@ -231,7 +267,13 @@ def mock_weather_payload(location: str) -> dict[str, Any]:
     }
 
 
-def fetch_weather_payload(location: str, use_mock: bool | None = None) -> tuple[dict[str, Any], str]:
+def fetch_weather_payload(
+    location: str,
+    use_mock: bool | None = None,
+    request_get: Callable[..., Any] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    max_attempts: int = 3,
+) -> tuple[dict[str, Any], str]:
     if use_mock is None:
         use_mock = os.getenv("USE_MOCK_WEATHER", "true").strip().lower() in {"1", "true", "yes"}
     if use_mock:
@@ -240,17 +282,55 @@ def fetch_weather_payload(location: str, use_mock: bool | None = None) -> tuple[
     api_key = os.getenv("WEATHERSTACK_API_KEY", "")
     if not api_key:
         raise ValueError("WEATHERSTACK_API_KEY is required when USE_MOCK_WEATHER=false")
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
     try:
         import requests
     except ImportError as exc:
         raise RuntimeError("requests is required for live weather; install requirements.txt") from exc
-    try:
-        response = requests.get(WEATHERSTACK_URL, params={"access_key": api_key, "query": location}, timeout=30)
-        response.raise_for_status()
-        payload = response.json()
-    except requests.RequestException as exc:
-        # Requests exceptions can include the full URL, including the API key query parameter.
-        raise RuntimeError(f"Weatherstack request failed for location {location!r}") from exc
+    request = request_get or requests.get
+    retryable_statuses = {429, 500, 502, 503, 504}
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = request(
+                WEATHERSTACK_URL,
+                params={"access_key": api_key, "query": location},
+                timeout=(5, 30),
+            )
+            status = getattr(response, "status_code", 200)
+            if status in retryable_statuses and attempt < max_attempts:
+                delay = min(0.5 * (2 ** (attempt - 1)), 8.0)
+                logger.warning(
+                    "Weather request for %s returned HTTP %s; retrying attempt %d/%d after %.1fs",
+                    location,
+                    status,
+                    attempt + 1,
+                    max_attempts,
+                    delay,
+                )
+                sleep(delay)
+                continue
+            response.raise_for_status()
+            payload = response.json()
+            break
+        except requests.RequestException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            retryable = status is None or status in retryable_statuses
+            if retryable and attempt < max_attempts:
+                delay = min(0.5 * (2 ** (attempt - 1)), 8.0)
+                logger.warning(
+                    "Weather request for %s failed; retrying attempt %d/%d after %.1fs",
+                    location,
+                    attempt + 1,
+                    max_attempts,
+                    delay,
+                )
+                sleep(delay)
+                continue
+            # Requests exceptions can include the full URL, including the API key query parameter.
+            raise RuntimeError(f"Weatherstack request failed for location {location!r} after {attempt} attempt(s)") from exc
+    else:
+        raise RuntimeError(f"Weatherstack request failed for location {location!r} after {max_attempts} attempts")
     if payload.get("success") is False:
         # Do not include the full provider response in logs; it may echo request details.
         raise ValueError(f"Weatherstack returned an error for location {location!r}")
